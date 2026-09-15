@@ -203,6 +203,9 @@
     let currentUserId = null; 
     let saveTimeout = null; 
 
+    // Key hold timer — the timer itself is the "isHolding" flag
+    let keyHoldTimer = null;
+
     function lsGet(key, fallback) {
       try {
         const v = localStorage.getItem(key);
@@ -649,11 +652,25 @@
       setCustomKey(e.key);
     });
 
-    /* ==============================================
-       FIXED keydown handler:
-       - Enter key always triggers repeatMantra (except when setting custom key)
-       - Custom key triggers when not typing in an input
-       ============================================== */
+    // ==============================================
+    // FULL-SPEED KEY HOLD LOGIC (robust version)
+    // ==============================================
+    function startKeyHold() {
+      // If timer is already running, just ignore (OS auto-repeat protection)
+      if (keyHoldTimer !== null) return;
+      // Fire once immediately for instant feedback
+      repeatMantra();
+      // Then continuously fire at the browser's fastest rate
+      keyHoldTimer = setInterval(repeatMantra, 0);
+    }
+
+    function stopKeyHold() {
+      if (keyHoldTimer !== null) {
+        clearInterval(keyHoldTimer);
+        keyHoldTimer = null;
+      }
+    }
+
     document.addEventListener("keydown", function(e) {
       const el = e.target;
       const elId = (el && el.id) ? el.id : "";
@@ -666,21 +683,36 @@
       const tag = (el && el.tagName) ? el.tagName.toLowerCase() : "";
       const inInput = (tag === "input" || tag === "select" || tag === "textarea" || (el && el.isContentEditable));
 
-      // 1) Enter key: always triggers (even from inputs) except the mantra input
-      if (e.key === "Enter") {
-        if (elId === "mantraInput") return;
-        e.preventDefault();
-        repeatMantra();
-        return;
+      const isEnter = (e.key === "Enter" || e.code === "NumpadEnter");
+      const isCustom = (customKey && customKey !== "Enter" && e.key === customKey);
+
+      let shouldTrigger = false;
+
+      // Enter key: triggers even from inputs (except mantra input)
+      if (isEnter && elId !== "mantraInput") {
+        shouldTrigger = true;
+      }
+      // Custom key: triggers only outside of input fields
+      else if (isCustom && !inInput) {
+        shouldTrigger = true;
       }
 
-      // 2) Custom key (when set): triggers only outside of input fields
-      if (customKey && e.key === customKey && customKey !== "Enter") {
-        if (inInput) return;
-        e.preventDefault();
-        repeatMantra();
+      if (!shouldTrigger) return;
+
+      e.preventDefault();
+      startKeyHold();
+    });
+
+    document.addEventListener("keyup", function(e) {
+      const isEnter = (e.key === "Enter" || e.code === "NumpadEnter");
+      const isCustom = (customKey && e.key === customKey);
+      if (isEnter || isCustom) {
+        stopKeyHold();
       }
     });
+
+    // Safety: stop the timer if the window loses focus (prevents stuck state)
+    window.addEventListener("blur", stopKeyHold);
 
     window.setMantra = setMantra;
     window.removeGodImage = removeGodImage;
