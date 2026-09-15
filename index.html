@@ -752,7 +752,7 @@
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => {
         saveDataToCloud();
-      }, 1000); // 1 second after last activity — well within the 3-sec budget
+      }, 10000); // 10 second after last activity — well within the 3-sec budget
     }
 
     async function saveDataToCloud() {
