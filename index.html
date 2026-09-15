@@ -67,6 +67,17 @@
       font-weight: bold;
       color: var(--primary);
     }
+    /* --- Sync Status Indicator --- */
+    #sync-status {
+      font-size: 13px;
+      margin-top: 6px;
+      min-height: 18px;
+      color: #888;
+      transition: color 0.3s;
+    }
+    #sync-status.syncing { color: #ff9800; }
+    #sync-status.synced { color: #4caf50; }
+    #sync-status.error { color: #f44336; }
   </style>
 </head>
 <body>
@@ -78,6 +89,7 @@
       <span id="user-name"></span>
       <button id="signout-btn">Sign Out</button>
     </div>
+    <div id="sync-status"></div>
   </div>
 
   <div class="mantra-entry">
@@ -202,9 +214,8 @@
     let customKey = "";
     let currentUserId = null; 
     let saveTimeout = null; 
-
-    // Key hold timer — the timer itself is the "isHolding" flag
     let keyHoldTimer = null;
+    let pendingSave = false; // Flag: is there an unsaved change?
 
     function lsGet(key, fallback) {
       try {
@@ -223,6 +234,15 @@
         const parsed = JSON.parse(lsGet("mantraHistory", "[]"));
         return Array.isArray(parsed) ? parsed : [];
       } catch (e) { return []; }
+    }
+
+    /* ---------- Sync Status Indicator ---------- */
+    function updateSyncStatus(state, message) {
+      const el = document.getElementById("sync-status");
+      if (!el) return;
+      el.className = "";
+      if (state) el.classList.add(state);
+      el.textContent = message || "";
     }
 
     function formatHyper(state) {
@@ -403,7 +423,8 @@
         updateDisplay();
         storeCount(currentMantra, count);
         storeDailyCount(currentMantra, 1);
-        saveDataToCloud();
+        lsSet("perPressValue", raw);
+        scheduleCloudSave(); // FIXED: debounced, not immediate
         return;
       }
 
@@ -614,6 +635,11 @@
       scheduleCloudSave(); 
     });
 
+    document.getElementById("perPressInput").addEventListener("input", function() {
+      lsSet("perPressValue", this.value.trim());
+      scheduleCloudSave();
+    });
+
     document.getElementById("operationSelect").addEventListener("change", function() {
       lsSet("operationValue", this.value);
       hyperState = null;
@@ -652,15 +678,9 @@
       setCustomKey(e.key);
     });
 
-    // ==============================================
-    // FULL-SPEED KEY HOLD LOGIC (robust version)
-    // ==============================================
     function startKeyHold() {
-      // If timer is already running, just ignore (OS auto-repeat protection)
       if (keyHoldTimer !== null) return;
-      // Fire once immediately for instant feedback
       repeatMantra();
-      // Then continuously fire at the browser's fastest rate
       keyHoldTimer = setInterval(repeatMantra, 0);
     }
 
@@ -675,9 +695,7 @@
       const el = e.target;
       const elId = (el && el.id) ? el.id : "";
 
-      // Never trigger from custom key input (used for setting custom key)
       if (elId === "customKeyInput") return;
-      // Skip Ctrl/Cmd/Alt combos
       if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       const tag = (el && el.tagName) ? el.tagName.toLowerCase() : "";
@@ -688,12 +706,9 @@
 
       let shouldTrigger = false;
 
-      // Enter key: triggers even from inputs (except mantra input)
       if (isEnter && elId !== "mantraInput") {
         shouldTrigger = true;
-      }
-      // Custom key: triggers only outside of input fields
-      else if (isCustom && !inInput) {
+      } else if (isCustom && !inInput) {
         shouldTrigger = true;
       }
 
@@ -711,7 +726,6 @@
       }
     });
 
-    // Safety: stop the timer if the window loses focus (prevents stuck state)
     window.addEventListener("blur", stopKeyHold);
 
     window.setMantra = setMantra;
@@ -724,16 +738,31 @@
     window.setTheme = setTheme;
     window.clearCustomKey = clearCustomKey;
 
+    // ==============================================
+    // FIRESTORE SYNC (Fixed debounce + status)
+    // ==============================================
+
     function scheduleCloudSave() {
-      if (!currentUserId) return; 
+      if (!currentUserId) {
+        updateSyncStatus("", "");
+        return;
+      }
+      pendingSave = true;
+      updateSyncStatus("syncing", "Waiting to sync...");
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => {
         saveDataToCloud();
-      }, 1000); 
+      }, 1000); // 1 second after last activity — well within the 3-sec budget
     }
 
     async function saveDataToCloud() {
-      if (!currentUserId) return;
+      if (!currentUserId) {
+        updateSyncStatus("", "");
+        return;
+      }
+
+      clearTimeout(saveTimeout);
+      saveTimeout = null;
 
       const userDocRef = doc(db, "users", currentUserId);
       const dataToSave = {
@@ -746,16 +775,27 @@
         lastUpdated: new Date()
       };
 
+      updateSyncStatus("syncing", "Syncing...");
+
       try {
         await setDoc(userDocRef, dataToSave, { merge: true });
+        pendingSave = false;
+        const now = new Date().toLocaleTimeString();
+        updateSyncStatus("synced", "✓ Synced at " + now);
         console.log("Data saved to cloud.");
       } catch (e) {
+        updateSyncStatus("error", "✗ Sync failed — retrying...");
         console.error("Error saving document: ", e);
+        // Retry once after 3 seconds
+        setTimeout(() => {
+          if (pendingSave) saveDataToCloud();
+        }, 3000);
       }
     }
 
     async function loadUserDataFromCloud(userId) {
       const userDocRef = doc(db, "users", userId);
+      updateSyncStatus("syncing", "Loading from cloud...");
       try {
         const docSnap = await getDoc(userDocRef);
         if (docSnap.exists()) {
@@ -791,14 +831,29 @@
 
           updateDisplay();
           populateHistoryDropdown();
+          updateSyncStatus("synced", "✓ Loaded from cloud");
         } else {
           console.log("No cloud data found for this user. Starting fresh.");
+          updateSyncStatus("", "No cloud data — starting fresh");
         }
       } catch (e) {
+        updateSyncStatus("error", "✗ Failed to load from cloud");
         console.error("Error loading document: ", e);
       }
     }
 
+    // Flush any pending save when the user closes the tab
+    window.addEventListener("beforeunload", function() {
+      if (pendingSave && currentUserId) {
+        // Use a best-effort synchronous-like save via the fetch keepalive API isn't available,
+        // so we trigger it asynchronously and hope the browser completes it
+        try { saveDataToCloud(); } catch (e) { /* ignore */ }
+      }
+    });
+
+    // ==============================================
+    // AUTH LOGIC
+    // ==============================================
     const provider = new GoogleAuthProvider();
     const signInButton = document.getElementById('google-signin-btn');
     const signOutButton = document.getElementById('signout-btn');
@@ -832,6 +887,7 @@
         currentUserId = null;
         signInButton.style.display = 'block';
         userInfoDiv.style.display = 'none';
+        updateSyncStatus("", "");
       }
     });
 
