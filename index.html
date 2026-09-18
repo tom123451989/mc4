@@ -67,7 +67,6 @@
       font-weight: bold;
       color: var(--primary);
     }
-    /* --- Sync Status Indicator --- */
     #sync-status {
       font-size: 13px;
       margin-top: 6px;
@@ -223,7 +222,7 @@
     let currentUserId = null; 
     let saveTimeout = null; 
     let keyHoldTimer = null;
-    let pendingSave = false; // Flag: is there an unsaved change?
+    let pendingSave = false;
 
     function lsGet(key, fallback) {
       try {
@@ -244,7 +243,6 @@
       } catch (e) { return []; }
     }
 
-    /* ---------- Sync Status Indicator ---------- */
     function updateSyncStatus(state, message) {
       const el = document.getElementById("sync-status");
       if (!el) return;
@@ -432,7 +430,7 @@
         storeCount(currentMantra, count);
         storeDailyCount(currentMantra, 1);
         lsSet("perPressValue", raw);
-        scheduleCloudSave(); // FIXED: debounced, not immediate
+        scheduleCloudSave();
         return;
       }
 
@@ -590,7 +588,7 @@
 
     function toggleAutoRepeat() {
       const button = document.getElementById("autoRepeatBtn");
-      const interval = parseInt(document.getElementById("intervalSelect").value);
+      const interval = parseFloat(document.getElementById("intervalSelect").value);
       if (autoRepeatInterval) {
         clearInterval(autoRepeatInterval);
         autoRepeatInterval = null;
@@ -746,10 +744,6 @@
     window.setTheme = setTheme;
     window.clearCustomKey = clearCustomKey;
 
-    // ==============================================
-    // FIRESTORE SYNC (Fixed debounce + status)
-    // ==============================================
-
     function scheduleCloudSave() {
       if (!currentUserId) {
         updateSyncStatus("", "");
@@ -760,7 +754,7 @@
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => {
         saveDataToCloud();
-      }, 10000); // 10 second after last activity — well within the 3-sec budget
+      }, 10000);
     }
 
     async function saveDataToCloud() {
@@ -794,7 +788,6 @@
       } catch (e) {
         updateSyncStatus("error", "✗ Sync failed — retrying...");
         console.error("Error saving document: ", e);
-        // Retry once after 3 seconds
         setTimeout(() => {
           if (pendingSave) saveDataToCloud();
         }, 3000);
@@ -850,18 +843,12 @@
       }
     }
 
-    // Flush any pending save when the user closes the tab
     window.addEventListener("beforeunload", function() {
       if (pendingSave && currentUserId) {
-        // Use a best-effort synchronous-like save via the fetch keepalive API isn't available,
-        // so we trigger it asynchronously and hope the browser completes it
-        try { saveDataToCloud(); } catch (e) { /* ignore */ }
+        try { saveDataToCloud(); } catch (e) { }
       }
     });
 
-    // ==============================================
-    // AUTH LOGIC
-    // ==============================================
     const provider = new GoogleAuthProvider();
     const signInButton = document.getElementById('google-signin-btn');
     const signOutButton = document.getElementById('signout-btn');
