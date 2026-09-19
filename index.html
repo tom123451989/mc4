@@ -262,13 +262,28 @@
     /* ============================================================
        ARBITRARY PRECISION HELPERS
        ============================================================ */
+
+    // Max safe integer for exponent arithmetic.
+    // Beyond this, e + 1 === e in float, causing normalization to reset.
+    const MAX_SAFE_EXP = 9007199254740991;
+
     function bigZero() { return { m: 0n, e: 0 }; }
+
+    /* 🐛 FIXED bigNormalize:
+       When the exponent is beyond Number.MAX_SAFE_INTEGER, we CANNOT
+       increment it accurately — "1e100 + 1 === 1e100" in float.
+       So we skip normalization entirely. The mantissa keeps growing
+       (e.g. 9 → 10 → 11 → ... → 9999999) and bigToDisplay handles
+       the unnormalized form. This prevents the counter from "resetting"
+       to 1 × 10^10^100 every time the mantissa hits a multiple of 10. */
     function bigNormalize(x) {
       let m = x.m, e = x.e;
       if (m === 0n) return { m: 0n, e: 0 };
+      if (Math.abs(e) > MAX_SAFE_EXP) return { m: m, e: e };
       while (m % 10n === 0n) { m = m / 10n; e += 1; }
       return { m: m, e: e };
     }
+
     function bigFromString(str) {
       if (str === null || str === undefined) return null;
       let s = String(str).replace(/\s+/g, "");
@@ -288,10 +303,12 @@
       mantStr = mantStr.replace(/^0+/, "") || "0";
       return bigNormalize({ m: BigInt(mantStr) * sign, e: exp });
     }
+
     function bigFromNumber(n) {
       if (!isFinite(n)) return null;
       return bigFromString(String(n));
     }
+
     function toBig(x) {
       if (x === null || x === undefined) return bigZero();
       if (typeof x === "object" && typeof x.m === "bigint" && typeof x.e === "number") return x;
@@ -299,17 +316,14 @@
       if (typeof x === "number") return bigFromNumber(x) || bigZero();
       return bigFromString(String(x)) || bigZero();
     }
+
     function bigMul(a, b) {
       a = toBig(a); b = toBig(b);
       return bigNormalize({ m: a.m * b.m, e: a.e + b.e });
     }
 
-    /* 🐛 FIXED bigAdd:
-       - Direction of dominant-term shortcut was REVERSED.
-         When count = 1e15 and addend = 1e1e100, old code returned
-         the SMALL number (count), silently ignoring the huge addend.
-       - Threshold lowered from 1000 → 30. This prevents mantissa
-         from growing to hundreds of digits (which caused "screen full of zeros"). */
+    /* bigAdd — Dominant-term shortcut when exponent difference > 30,
+       so adding 1 to Googolplex doesn't build a 10^100-digit mantissa. */
     function bigAdd(a, b) {
       a = toBig(a); b = toBig(b);
       if (a.m === 0n) return { m: b.m, e: b.e };
@@ -317,8 +331,6 @@
       const e = Math.min(a.e, b.e);
       const diffA = a.e - e;
       const diffB = b.e - e;
-      // If exponent difference exceeds 30 digits, larger term dominates.
-      // Return the DOMINANT term (larger exponent), not the smaller one.
       if (diffA > 30) return { m: a.m, e: a.e };
       if (diffB > 30) return { m: b.m, e: b.e };
       const am = a.m * (10n ** BigInt(diffA));
@@ -327,6 +339,7 @@
     }
 
     function bigIsZero(a) { return toBig(a).m === 0n; }
+
     function bigToNumber(a) {
       a = toBig(a);
       if (a.m === 0n) return 0;
@@ -334,65 +347,66 @@
     }
 
     /* 🐛 FIXED bigToDisplay:
-       - Aggressive scientific notation. Flat notation only when the
-         total character count is <= 13. This prevents "screen full of
-         zeros" for large numbers.
-       - Googolplex-class exponents (sciExp >= 1e15) get formatted as
-         "mantissa × 10^(10^k)" for readability.
-       - Mantissa truncated at 15 digits for display sanity. */
+       - Huge-exponent path: mantissa may be large (unnormalized), so we
+         show "mantissa × 10^(10^k)" and truncate mantissa at 15 digits.
+       - Normal path: flat notation only when short; otherwise scientific.
+       - Threshold lowered for aggressive sci notation (no more zero spam). */
     function bigToDisplay(a) {
       a = toBig(a);
       if (a.m === 0n) return "0";
       const neg = a.m < 0n;
-      const mantStr = (neg ? -a.m : a.m).toString();
+      const mantAbs = neg ? -a.m : a.m;
+      const mantStr = mantAbs.toString();
       const digits = mantStr.length;
       const exp = a.e;
       const sciExp = digits - 1 + exp;
 
-      // Compute flat representation length
-      let flatLen;
-      if (sciExp < 0) {
-        flatLen = digits - sciExp + 1;  // "0." + zeros + mantissa
-      } else {
-        flatLen = sciExp + 1;
+      // 🚀 HUGE EXPONENT territory — Googolplex and beyond
+      if (Math.abs(exp) > MAX_SAFE_EXP) {
+        let mantDisplay;
+        if (digits <= 15) {
+          mantDisplay = mantStr;
+        } else {
+          mantDisplay = mantStr[0] + "." + mantStr.slice(1, 15) + "e+" + (digits - 1);
+        }
+        const log10 = Math.log10(Math.abs(exp));
+        const isPower10 = Math.abs(log10 - Math.round(log10)) < 1e-9;
+        let expDisplay;
+        if (isPower10) expDisplay = "10^" + Math.round(log10);
+        else expDisplay = Math.abs(exp).toExponential(2);
+        return (neg ? "-" : "") + mantDisplay + " × 10^" + (exp < 0 ? "-" : "") + expDisplay;
       }
-      // Flat notation only if the result is short AND the exponent is reasonable
+
+      // Normal-range handling
+      let flatLen;
+      if (sciExp < 0) flatLen = digits - sciExp + 1;
+      else flatLen = sciExp + 1;
+
+      // Only use flat notation when result is short
       if (sciExp >= -5 && sciExp < 15 && flatLen <= 13) {
         const pointPos = digits + exp;
-        if (pointPos >= digits) {
-          return (neg ? "-" : "") + mantStr + "0".repeat(exp);
-        } else if (pointPos > 0) {
-          return (neg ? "-" : "") + mantStr.slice(0, pointPos) + "." + mantStr.slice(pointPos);
-        } else {
-          return (neg ? "-" : "") + "0." + "0".repeat(-pointPos) + mantStr;
-        }
+        if (pointPos >= digits) return (neg ? "-" : "") + mantStr + "0".repeat(exp);
+        if (pointPos > 0) return (neg ? "-" : "") + mantStr.slice(0, pointPos) + "." + mantStr.slice(pointPos);
+        return (neg ? "-" : "") + "0." + "0".repeat(-pointPos) + mantStr;
       }
 
-      // Scientific notation — cap mantissa display at 15 digits
+      // Scientific notation
       const maxMantDigits = 15;
       let mantDisplay;
-      if (digits === 1) {
-        mantDisplay = mantStr;
-      } else if (digits <= maxMantDigits) {
-        mantDisplay = mantStr[0] + "." + mantStr.slice(1);
-      } else {
-        mantDisplay = mantStr[0] + "." + mantStr.slice(1, maxMantDigits);
-      }
+      if (digits === 1) mantDisplay = mantStr;
+      else if (digits <= maxMantDigits) mantDisplay = mantStr[0] + "." + mantStr.slice(1);
+      else mantDisplay = mantStr[0] + "." + mantStr.slice(1, maxMantDigits);
 
-      // Regular scientific (e.g. "1.23e+50")
+      // Googolplex-class exponents (1e6 < |sciExp| < MAX_SAFE_EXP)
       if (Math.abs(sciExp) < 1e6) {
         return (neg ? "-" : "") + mantDisplay + "e" + (sciExp >= 0 ? "+" : "") + sciExp;
       }
 
-      // Googolplex-class exponent — format as "10^(10^k)" or "10^(sciExp)"
       const log10 = Math.log10(Math.abs(sciExp));
       const isPower10 = Math.abs(log10 - Math.round(log10)) < 1e-9;
       let expDisplay;
-      if (isPower10) {
-        expDisplay = "10^" + Math.round(log10);
-      } else {
-        expDisplay = Math.abs(sciExp).toExponential(2);
-      }
+      if (isPower10) expDisplay = "10^" + Math.round(log10);
+      else expDisplay = Math.abs(sciExp).toExponential(2);
       return (neg ? "-" : "") + mantDisplay + "×10^" + (sciExp < 0 ? "-" : "") + expDisplay;
     }
 
@@ -402,6 +416,7 @@
       if (Number.isFinite(n) && Math.abs(n) < 9007199254740992) return n;
       return s;
     }
+
     function bigPow(base, exp) {
       if (exp <= 0) return { m: 1n, e: 0 };
       if (exp > 100000) exp = 100000;
@@ -415,6 +430,7 @@
       }
       return result;
     }
+
     function parseNumberExpression(raw) {
       const s = String(raw == null ? "" : raw).trim();
       if (!s) return null;
@@ -433,6 +449,7 @@
       }
       return bigFromString(s);
     }
+
     function parseRepetitionValue(raw) {
       const s = String(raw == null ? "" : raw).trim();
       if (!s) return { sci: bigFromNumber(1), num: 1, scientific: false };
@@ -462,6 +479,7 @@
     function iterAdd(iter, amountSci) {
       const a = iterAsSci(iter);
       const result = bigAdd(a, amountSci);
+      // Downgrade back to Number if safely small
       if (typeof iter === "number" && result.e >= 0 && result.e < 15) {
         const n = Number(result.m) * Math.pow(10, result.e);
         if (Number.isSafeInteger(n) && Math.abs(n) < 1e15) return n;
@@ -597,7 +615,6 @@
     }
     function storeDailyCount(text, amount) {
       amount = amount || 1;
-      // Cap daily amount to avoid astronomical localStorage values
       if (!Number.isFinite(amount) || Math.abs(amount) > 1e15) amount = 1e15;
       const today = new Date().toISOString().split("T")[0];
       const key = "mantraDailyCounts_" + text;
@@ -714,15 +731,11 @@
       document.getElementById("operationSelect").value = saved;
     }
 
-    /* 🐛 FIXED applyTurboSpeed: Googol is now explicitly {m:1n, e:100}
-       instead of relying on bigFromNumber(1e100) — avoids float precision issues. */
     function applyTurboSpeed(value) {
       if (value === "googolplex") {
-        // 10^(10^100)
         turboBatchSci = { m: 1n, e: 1e100 };
         turboBatch = 1e100;
       } else if (value === "googol") {
-        // 10^100 — exact construction, not via Number
         turboBatchSci = { m: 1n, e: 100 };
         turboBatch = 1e100;
       } else {
@@ -802,7 +815,7 @@
     }
 
     /* ============================================================
-       🚀 TURBO MODE — up to Googolplex per tick
+       🚀 TURBO MODE
        ============================================================ */
     function toggleTurbo() {
       turboEnabled = !turboEnabled;
@@ -877,6 +890,9 @@
           storeDailyCount(currentMantra, dailyInc);
         }
       }
+      // ✅ Turbo now uses the same 5-second debounce as everything else.
+      // Rapid bursts collapse into a single Firestore write, protecting
+      // the Spark plan's 20K writes/day limit.
       if (currentUserId && currentMantra) {
         scheduleCloudSave();
       }
