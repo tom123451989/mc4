@@ -181,8 +181,8 @@
         <option value="50000000">Ludicrous (50M/tick)</option>
         <option value="1000000000" selected>Insane (1B/tick)</option>
         <option value="1000000000000">Godmode (1T/tick)</option>
-        <option value="1e100">Googol (1e100/tick)</option>
-        <option value="googolplex">Googolplex (10^10^100 / tick)</option>
+        <option value="googol">Googol (1e100/tick)</option>
+        <option value="googolplex">Googolplex (10^10^100/tick)</option>
       </select>
     </label>
     <div id="turboInfo">Hold Enter (or custom key) to blast the counter.</div>
@@ -254,10 +254,10 @@
     let turboHyper = false;
     let turboFrames = 0;
     let turboStartedAt = 0;
-    let turboBatch = 1000000000;      // Number batch (for hyperops, add/multiply)
-    let turboBatchSci = null;         // {m, e} batch for Googolplex-class
-    let turboBatchAddend = null;      // precomputed: reps × batch (Add mode)
-    let turboBatchMultiplier = null;  // precomputed: reps^100 (Multiply mode)
+    let turboBatch = 1000000000;
+    let turboBatchSci = null;
+    let turboBatchAddend = null;
+    let turboBatchMultiplier = null;
 
     /* ============================================================
        ARBITRARY PRECISION HELPERS
@@ -303,6 +303,13 @@
       a = toBig(a); b = toBig(b);
       return bigNormalize({ m: a.m * b.m, e: a.e + b.e });
     }
+
+    /* 🐛 FIXED bigAdd:
+       - Direction of dominant-term shortcut was REVERSED.
+         When count = 1e15 and addend = 1e1e100, old code returned
+         the SMALL number (count), silently ignoring the huge addend.
+       - Threshold lowered from 1000 → 30. This prevents mantissa
+         from growing to hundreds of digits (which caused "screen full of zeros"). */
     function bigAdd(a, b) {
       a = toBig(a); b = toBig(b);
       if (a.m === 0n) return { m: b.m, e: b.e };
@@ -310,20 +317,29 @@
       const e = Math.min(a.e, b.e);
       const diffA = a.e - e;
       const diffB = b.e - e;
-      // Safety: if exponent difference is enormous, smaller term is negligible
-      // Prevents BigInt blowup with googolplex-class exponents
-      if (diffA > 1000) return { m: b.m, e: b.e };
-      if (diffB > 1000) return { m: a.m, e: a.e };
+      // If exponent difference exceeds 30 digits, larger term dominates.
+      // Return the DOMINANT term (larger exponent), not the smaller one.
+      if (diffA > 30) return { m: a.m, e: a.e };
+      if (diffB > 30) return { m: b.m, e: b.e };
       const am = a.m * (10n ** BigInt(diffA));
       const bm = b.m * (10n ** BigInt(diffB));
       return bigNormalize({ m: am + bm, e: e });
     }
+
     function bigIsZero(a) { return toBig(a).m === 0n; }
     function bigToNumber(a) {
       a = toBig(a);
       if (a.m === 0n) return 0;
       return Number(bigToDisplay(a));
     }
+
+    /* 🐛 FIXED bigToDisplay:
+       - Aggressive scientific notation. Flat notation only when the
+         total character count is <= 13. This prevents "screen full of
+         zeros" for large numbers.
+       - Googolplex-class exponents (sciExp >= 1e15) get formatted as
+         "mantissa × 10^(10^k)" for readability.
+       - Mantissa truncated at 15 digits for display sanity. */
     function bigToDisplay(a) {
       a = toBig(a);
       if (a.m === 0n) return "0";
@@ -332,22 +348,54 @@
       const digits = mantStr.length;
       const exp = a.e;
       const sciExp = digits - 1 + exp;
-      if (sciExp >= -6 && sciExp < 21) {
-        const pointPos = digits + exp;
-        if (pointPos >= digits) return (neg ? "-" : "") + mantStr + "0".repeat(exp);
-        if (pointPos > 0) return (neg ? "-" : "") + mantStr.slice(0, pointPos) + "." + mantStr.slice(pointPos);
-        return (neg ? "-" : "") + "0." + "0".repeat(-pointPos) + mantStr;
-      }
-      const first = mantStr[0];
-      const rest = mantStr.slice(1);
-      const mantDisplay = rest ? first + "." + rest : first;
-      // Handle googolplex-class exponents gracefully
-      if (sciExp < 1e6) {
-        return (neg ? "-" : "") + mantDisplay + "e" + (sciExp >= 0 ? "+" : "") + sciExp;
+
+      // Compute flat representation length
+      let flatLen;
+      if (sciExp < 0) {
+        flatLen = digits - sciExp + 1;  // "0." + zeros + mantissa
       } else {
-        return (neg ? "-" : "") + mantDisplay + "×10^" + sciExp.toExponential();
+        flatLen = sciExp + 1;
       }
+      // Flat notation only if the result is short AND the exponent is reasonable
+      if (sciExp >= -5 && sciExp < 15 && flatLen <= 13) {
+        const pointPos = digits + exp;
+        if (pointPos >= digits) {
+          return (neg ? "-" : "") + mantStr + "0".repeat(exp);
+        } else if (pointPos > 0) {
+          return (neg ? "-" : "") + mantStr.slice(0, pointPos) + "." + mantStr.slice(pointPos);
+        } else {
+          return (neg ? "-" : "") + "0." + "0".repeat(-pointPos) + mantStr;
+        }
+      }
+
+      // Scientific notation — cap mantissa display at 15 digits
+      const maxMantDigits = 15;
+      let mantDisplay;
+      if (digits === 1) {
+        mantDisplay = mantStr;
+      } else if (digits <= maxMantDigits) {
+        mantDisplay = mantStr[0] + "." + mantStr.slice(1);
+      } else {
+        mantDisplay = mantStr[0] + "." + mantStr.slice(1, maxMantDigits);
+      }
+
+      // Regular scientific (e.g. "1.23e+50")
+      if (Math.abs(sciExp) < 1e6) {
+        return (neg ? "-" : "") + mantDisplay + "e" + (sciExp >= 0 ? "+" : "") + sciExp;
+      }
+
+      // Googolplex-class exponent — format as "10^(10^k)" or "10^(sciExp)"
+      const log10 = Math.log10(Math.abs(sciExp));
+      const isPower10 = Math.abs(log10 - Math.round(log10)) < 1e-9;
+      let expDisplay;
+      if (isPower10) {
+        expDisplay = "10^" + Math.round(log10);
+      } else {
+        expDisplay = Math.abs(sciExp).toExponential(2);
+      }
+      return (neg ? "-" : "") + mantDisplay + "×10^" + (sciExp < 0 ? "-" : "") + expDisplay;
     }
+
     function bigToStorage(a) {
       const s = bigToDisplay(a);
       const n = Number(s);
@@ -399,7 +447,7 @@
     }
 
     /* ============================================================
-       ITER HELPERS (for hyperops iter as Number or {m, e})
+       ITER HELPERS
        ============================================================ */
     function iterAsSci(iter) {
       if (iter === null || iter === undefined) return { m: 0n, e: 0 };
@@ -414,7 +462,6 @@
     function iterAdd(iter, amountSci) {
       const a = iterAsSci(iter);
       const result = bigAdd(a, amountSci);
-      // Downgrade back to Number if safely small
       if (typeof iter === "number" && result.e >= 0 && result.e < 15) {
         const n = Number(result.m) * Math.pow(10, result.e);
         if (Number.isSafeInteger(n) && Math.abs(n) < 1e15) return n;
@@ -550,6 +597,8 @@
     }
     function storeDailyCount(text, amount) {
       amount = amount || 1;
+      // Cap daily amount to avoid astronomical localStorage values
+      if (!Number.isFinite(amount) || Math.abs(amount) > 1e15) amount = 1e15;
       const today = new Date().toISOString().split("T")[0];
       const key = "mantraDailyCounts_" + text;
       let data = {};
@@ -590,10 +639,9 @@
           else if (symbol === "↑↑↑↑↑↑") op = 8;
           else if (symbol === "↑↑↑↑↑↑↑") op = 9;
           else if (symbol === "↑↑↑↑↑↑↑↑") op = 10;
-          // Iter may be a plain integer OR scientific notation
           let iter;
-          if (/[eE]/.test(iterRaw)) {
-            iter = bigFromString(iterRaw) || 0;
+          if (/[eE]/.test(iterRaw) || iterRaw.includes("×")) {
+            iter = bigFromString(iterRaw.replace(/×10\^\(?([^)]*)\)?/, "")) || 0;
           } else {
             iter = parseInt(iterRaw, 10) || 0;
           }
@@ -665,11 +713,18 @@
       const saved = lsGet("operationValue", "1");
       document.getElementById("operationSelect").value = saved;
     }
+
+    /* 🐛 FIXED applyTurboSpeed: Googol is now explicitly {m:1n, e:100}
+       instead of relying on bigFromNumber(1e100) — avoids float precision issues. */
     function applyTurboSpeed(value) {
       if (value === "googolplex") {
-        // Googolplex = 10^(10^100) = {m: 1n, e: 1e100}
+        // 10^(10^100)
         turboBatchSci = { m: 1n, e: 1e100 };
-        turboBatch = 1e100; // Numeric fallback (googol) for places needing Number
+        turboBatch = 1e100;
+      } else if (value === "googol") {
+        // 10^100 — exact construction, not via Number
+        turboBatchSci = { m: 1n, e: 100 };
+        turboBatch = 1e100;
       } else {
         turboBatch = Number(value) || 1000000000;
         turboBatchSci = null;
@@ -678,7 +733,6 @@
     function loadSavedTurboSpeed() {
       const saved = lsGet("turboSpeedValue", "1000000000");
       const select = document.getElementById("turboSpeedSelect");
-      // Guard against stale value
       const validOption = Array.from(select.options).some(o => o.value === saved);
       const chosen = validOption ? saved : "1000000000";
       select.value = chosen;
@@ -733,7 +787,7 @@
     });
 
     /* ============================================================
-       NORMAL KEY HOLD (setInterval ~250/sec)
+       NORMAL KEY HOLD
        ============================================================ */
     function startKeyHold() {
       if (keyHoldTimer !== null) return;
@@ -784,11 +838,9 @@
         count = toBig(count);
 
         if (op === 2) {
-          // Multiply mode: capped internal exponent (100× per tick)
           turboBatchMultiplier = bigPow(turboReps, 100);
           turboBatchAddend = null;
         } else {
-          // Add mode: precompute reps × batch once. Uses Sci for googolplex.
           const batchSci = turboBatchSci || bigFromNumber(turboBatch) || { m: 1n, e: 9 };
           turboBatchAddend = bigMul(turboReps, batchSci);
           turboBatchMultiplier = null;
@@ -802,7 +854,6 @@
       turboActive = true;
       turboFrames = 0;
       turboStartedAt = performance.now();
-      // Re-read the select (in case it changed)
       applyTurboSpeed(document.getElementById("turboSpeedSelect").value);
       prepareTurbo();
       turboMathTick();
@@ -819,16 +870,13 @@
         cancelAnimationFrame(turboDisplayRAF);
         turboDisplayRAF = null;
       }
-      // Final persistence
       if (currentMantra) {
         storeCount(currentMantra, count);
         if (hyperState) {
-          // Cap daily increment to avoid astronomical daily counts
-          const dailyInc = Math.min(turboFrames * turboBatch, 1e15);
+          const dailyInc = Math.min(turboFrames * Math.min(turboBatch, 1e10), 1e15);
           storeDailyCount(currentMantra, dailyInc);
         }
       }
-      // Force immediate cloud save (bypasses debounce)
       if (currentUserId && currentMantra) {
         saveDataToCloud();
       }
@@ -842,7 +890,6 @@
       if (!turboActive) return;
 
       if (turboHyper) {
-        // Iter increment — supports Number AND {m, e}
         const batchSci = turboBatchSci || bigFromNumber(turboBatch) || { m: 1n, e: 0 };
         hyperState.iter = iterAdd(hyperState.iter, batchSci);
       } else if (turboMode === 2) {
