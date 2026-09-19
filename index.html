@@ -177,8 +177,10 @@
       <select id="turboSpeedSelect">
         <option value="50000">Normal (50K/tick)</option>
         <option value="500000">Fast (500K/tick)</option>
-        <option value="5000000" selected>Extreme (5M/tick)</option>
+        <option value="5000000">Extreme (5M/tick)</option>
         <option value="50000000">Ludicrous (50M/tick)</option>
+        <option value="1000000000" selected>Insane (1B/tick)</option>
+        <option value="1000000000000">Godmode (1T/tick)</option>
       </select>
     </label>
     <div id="turboInfo">Hold Enter (or custom key) to blast the counter.</div>
@@ -243,14 +245,16 @@
     // 🚀 Turbo Mode state
     let turboEnabled = false;
     let turboActive = false;
-    let turboMathTimer = null;      // setTimeout loop (math)
-    let turboDisplayRAF = null;     // requestAnimationFrame loop (display)
+    let turboMathTimer = null;
+    let turboDisplayRAF = null;
     let turboReps = null;
     let turboMode = 1;
     let turboHyper = false;
     let turboFrames = 0;
     let turboStartedAt = 0;
-    let turboBatch = 5000000;       // default — Extreme
+    let turboBatch = 1000000000;      // default — Insane (1B/tick)
+    let turboBatchAddend = null;      // precomputed: reps × batch (Add mode)
+    let turboBatchMultiplier = null;  // precomputed: reps^100 (Multiply mode)
 
     function lsGet(key, fallback) {
       try { const v = localStorage.getItem(key); return v === null ? fallback : v; }
@@ -610,9 +614,9 @@
       document.getElementById("operationSelect").value = saved;
     }
     function loadSavedTurboSpeed() {
-      const saved = lsGet("turboSpeedValue", "5000000");
+      const saved = lsGet("turboSpeedValue", "1000000000");
       document.getElementById("turboSpeedSelect").value = saved;
-      turboBatch = parseInt(saved) || 5000000;
+      turboBatch = parseInt(saved) || 1000000000;
     }
 
     document.getElementById("customNumberInput").addEventListener("input", function() {
@@ -632,7 +636,7 @@
       saveDataToCloud();
     });
     document.getElementById("turboSpeedSelect").addEventListener("change", function() {
-      turboBatch = parseInt(this.value) || 5000000;
+      turboBatch = parseInt(this.value) || 1000000000;
       lsSet("turboSpeedValue", this.value);
     });
 
@@ -678,11 +682,13 @@
     }
 
     /* ============================================================
-       🚀 TURBO MODE — MAXIMUM SPEED
+       🚀 TURBO MODE — MAXIMUM SPEED (up to 1 Trillion per tick)
        - Math loop uses setTimeout(fn, 0) → fires ~250-400/sec
-       - Batch size configurable via Turbo Speed dropdown
+       - Batch size configurable: Normal → Fast → Extreme → Ludicrous
+                                 → Insane (1B) → Godmode (1T)
+       - Add mode: precomputed batch addend → one BigInt add per tick
+       - Multiply mode: capped internal exponent to stay storable
        - Display loop runs separately at 60 fps via requestAnimationFrame
-       - Net result: billions of ops/sec, smooth UI
        ============================================================ */
     function toggleTurbo() {
       turboEnabled = !turboEnabled;
@@ -704,6 +710,7 @@
     function prepareTurbo() {
       const op = parseInt(document.getElementById("operationSelect").value) || 1;
       const raw = document.getElementById("perPressInput").value || "1";
+
       if (op >= 3) {
         turboHyper = true;
         if (!hyperState || hyperState.base !== raw || hyperState.op !== op) {
@@ -715,6 +722,17 @@
         const parsed = parseRepetitionValue(raw);
         turboReps = parsed.sci;
         count = toBig(count);
+
+        if (op === 2) {
+          // Multiply mode: cap internal exponent so numbers stay storable.
+          // 100 is plenty — 10^150 ^ 100 per tick = 10^(15000) growth per tick.
+          turboBatchMultiplier = bigPow(turboReps, 100);
+          turboBatchAddend = null;
+        } else {
+          // Add mode: precompute reps × batch ONCE. Each tick = one BigInt add.
+          turboBatchAddend = bigMul(turboReps, bigFromNumber(turboBatch));
+          turboBatchMultiplier = null;
+        }
       }
     }
 
@@ -724,10 +742,10 @@
       turboActive = true;
       turboFrames = 0;
       turboStartedAt = performance.now();
-      turboBatch = parseInt(document.getElementById("turboSpeedSelect").value) || 5000000;
+      turboBatch = parseInt(document.getElementById("turboSpeedSelect").value) || 1000000000;
       prepareTurbo();
-      turboMathTick();     // kick off math loop
-      turboDisplayLoop();  // kick off display loop
+      turboMathTick();
+      turboDisplayLoop();
     }
 
     function stopTurbo() {
@@ -763,13 +781,9 @@
       if (turboHyper) {
         hyperState.iter += turboBatch;
       } else if (turboMode === 2) {
-        // Multiply mode — power by squaring with a fixed exponent
-        const repsN = bigPow(turboReps, turboBatch > 500000 ? 5000 : 500);
-        count = bigMul(count, repsN);
+        count = bigMul(count, turboBatchMultiplier);
       } else {
-        // Add mode — one batch addition
-        const batch = bigMul(turboReps, bigFromNumber(turboBatch));
-        count = bigAdd(count, batch);
+        count = bigAdd(count, turboBatchAddend);
       }
 
       turboFrames++;
