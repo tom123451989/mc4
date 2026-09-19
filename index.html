@@ -878,7 +878,7 @@
         }
       }
       if (currentUserId && currentMantra) {
-        saveDataToCloud();
+        scheduleCloudSave();
       }
       const elapsed = ((performance.now() - turboStartedAt) / 1000).toFixed(1);
       const info = document.getElementById("turboInfo");
