@@ -60,7 +60,6 @@
     #sync-status.synced { color: #4caf50; }
     #sync-status.error { color: #f44336; }
 
-    /* 🚀 Turbo Mode styles */
     #turboBtn {
       font-size: 22px !important;
       padding: 15px 30px !important;
@@ -76,6 +75,10 @@
     #turboInfo {
       font-size: 12px; color: #888; margin-top: 4px; min-height: 16px;
       max-width: 420px;
+    }
+    #turboSpeedSelect {
+      width: auto; background: var(--accent); font-weight: bold;
+      color: var(--primary); font-size: 15px;
     }
   </style>
 </head>
@@ -169,6 +172,15 @@
 
     <!-- 🚀 TURBO MODE -->
     <button id="turboBtn" onclick="toggleTurbo()">🚀 Turbo: OFF</button>
+    <label>
+      Turbo Speed:
+      <select id="turboSpeedSelect">
+        <option value="50000">Normal (50K/tick)</option>
+        <option value="500000">Fast (500K/tick)</option>
+        <option value="5000000" selected>Extreme (5M/tick)</option>
+        <option value="50000000">Ludicrous (50M/tick)</option>
+      </select>
+    </label>
     <div id="turboInfo">Hold Enter (or custom key) to blast the counter.</div>
 
     <label for="customKeyInput">
@@ -231,12 +243,14 @@
     // 🚀 Turbo Mode state
     let turboEnabled = false;
     let turboActive = false;
-    let turboRAF = null;
+    let turboMathTimer = null;      // setTimeout loop (math)
+    let turboDisplayRAF = null;     // requestAnimationFrame loop (display)
     let turboReps = null;
     let turboMode = 1;
     let turboHyper = false;
     let turboFrames = 0;
     let turboStartedAt = 0;
+    let turboBatch = 5000000;       // default — Extreme
 
     function lsGet(key, fallback) {
       try { const v = localStorage.getItem(key); return v === null ? fallback : v; }
@@ -348,7 +362,6 @@
       if (Number.isFinite(n) && Math.abs(n) < 9007199254740992) return n;
       return s;
     }
-    /* 🚀 Fast exponentiation (exponentiation by squaring) for Turbo Multiply mode */
     function bigPow(base, exp) {
       if (exp <= 0) return { m: 1n, e: 0 };
       if (exp > 100000) exp = 100000;
@@ -596,6 +609,11 @@
       const saved = lsGet("operationValue", "1");
       document.getElementById("operationSelect").value = saved;
     }
+    function loadSavedTurboSpeed() {
+      const saved = lsGet("turboSpeedValue", "5000000");
+      document.getElementById("turboSpeedSelect").value = saved;
+      turboBatch = parseInt(saved) || 5000000;
+    }
 
     document.getElementById("customNumberInput").addEventListener("input", function() {
       lsSet("customNumberValue", this.value.trim());
@@ -612,6 +630,10 @@
       count = bigZero();
       updateDisplay();
       saveDataToCloud();
+    });
+    document.getElementById("turboSpeedSelect").addEventListener("change", function() {
+      turboBatch = parseInt(this.value) || 5000000;
+      lsSet("turboSpeedValue", this.value);
     });
 
     function keyDisplayName(key) {
@@ -656,7 +678,11 @@
     }
 
     /* ============================================================
-       🚀 TURBO MODE (requestAnimationFrame + batched math)
+       🚀 TURBO MODE — MAXIMUM SPEED
+       - Math loop uses setTimeout(fn, 0) → fires ~250-400/sec
+       - Batch size configurable via Turbo Speed dropdown
+       - Display loop runs separately at 60 fps via requestAnimationFrame
+       - Net result: billions of ops/sec, smooth UI
        ============================================================ */
     function toggleTurbo() {
       turboEnabled = !turboEnabled;
@@ -698,24 +724,30 @@
       turboActive = true;
       turboFrames = 0;
       turboStartedAt = performance.now();
+      turboBatch = parseInt(document.getElementById("turboSpeedSelect").value) || 5000000;
       prepareTurbo();
-      turboFrame();
+      turboMathTick();     // kick off math loop
+      turboDisplayLoop();  // kick off display loop
     }
 
     function stopTurbo() {
       turboActive = false;
-      if (turboRAF !== null) {
-        cancelAnimationFrame(turboRAF);
-        turboRAF = null;
+      if (turboMathTimer !== null) {
+        clearTimeout(turboMathTimer);
+        turboMathTimer = null;
       }
-      // Persist final state to localStorage
+      if (turboDisplayRAF !== null) {
+        cancelAnimationFrame(turboDisplayRAF);
+        turboDisplayRAF = null;
+      }
+      // Final persistence
       if (currentMantra) {
         storeCount(currentMantra, count);
         if (hyperState) {
-          storeDailyCount(currentMantra, turboFrames * 50000);
+          storeDailyCount(currentMantra, turboFrames * turboBatch);
         }
       }
-      // 🚀 GitHub-specific: force an immediate cloud save (bypass 10-sec debounce)
+      // Force immediate cloud save (bypasses debounce)
       if (currentUserId && currentMantra) {
         saveDataToCloud();
       }
@@ -725,30 +757,39 @@
         + (hyperState ? formatHyper(hyperState) : bigToDisplay(count));
     }
 
-    function turboFrame() {
+    function turboMathTick() {
       if (!turboActive) return;
+
       if (turboHyper) {
-        hyperState.iter += 50000;
+        hyperState.iter += turboBatch;
       } else if (turboMode === 2) {
-        const repsN = bigPow(turboReps, 500);
+        // Multiply mode — power by squaring with a fixed exponent
+        const repsN = bigPow(turboReps, turboBatch > 500000 ? 5000 : 500);
         count = bigMul(count, repsN);
       } else {
-        const batch = bigMul(turboReps, bigFromNumber(50000));
+        // Add mode — one batch addition
+        const batch = bigMul(turboReps, bigFromNumber(turboBatch));
         count = bigAdd(count, batch);
       }
-      turboFrames++;
-      updateDisplay();
 
-      // Safety: store to localStorage every ~5 seconds
-      if (turboFrames % 300 === 0 && currentMantra) {
+      turboFrames++;
+
+      // Auto-save to localStorage every ~1000 ticks (crash safety)
+      if (turboFrames % 1000 === 0 && currentMantra) {
         storeCount(currentMantra, count);
       }
 
-      turboRAF = requestAnimationFrame(turboFrame);
+      turboMathTimer = setTimeout(turboMathTick, 0);
+    }
+
+    function turboDisplayLoop() {
+      if (!turboActive) return;
+      updateDisplay();
+      turboDisplayRAF = requestAnimationFrame(turboDisplayLoop);
     }
 
     /* ============================================================
-       KEYBOARD ROUTING (turbo vs normal based on toggle)
+       KEYBOARD ROUTING
        ============================================================ */
     document.addEventListener("keydown", function(e) {
       const el = e.target;
@@ -795,7 +836,7 @@
     window.toggleTurbo = toggleTurbo;
 
     /* ============================================================
-       FIRESTORE SYNC (debounced + status)
+       FIRESTORE SYNC (5-sec debounce)
        ============================================================ */
     function scheduleCloudSave() {
       if (!currentUserId) { updateSyncStatus("", ""); return; }
@@ -934,6 +975,7 @@
       loadSavedRepetitionPerPress();
       loadSavedCustomNumber();
       loadSavedOperation();
+      loadSavedTurboSpeed();
       const savedKey = lsGet("customKeyMapping", "");
       if (savedKey) setCustomKey(savedKey);
       updateDisplay();
