@@ -181,6 +181,8 @@
         <option value="50000000">Ludicrous (50M/tick)</option>
         <option value="1000000000" selected>Insane (1B/tick)</option>
         <option value="1000000000000">Godmode (1T/tick)</option>
+        <option value="1e100">Googol (1e100/tick)</option>
+        <option value="googolplex">Googolplex (10^10^100 / tick)</option>
       </select>
     </label>
     <div id="turboInfo">Hold Enter (or custom key) to blast the counter.</div>
@@ -252,42 +254,14 @@
     let turboHyper = false;
     let turboFrames = 0;
     let turboStartedAt = 0;
-    let turboBatch = 1000000000;      // default — Insane (1B/tick)
+    let turboBatch = 1000000000;      // Number batch (for hyperops, add/multiply)
+    let turboBatchSci = null;         // {m, e} batch for Googolplex-class
     let turboBatchAddend = null;      // precomputed: reps × batch (Add mode)
     let turboBatchMultiplier = null;  // precomputed: reps^100 (Multiply mode)
 
-    function lsGet(key, fallback) {
-      try { const v = localStorage.getItem(key); return v === null ? fallback : v; }
-      catch (e) { return fallback; }
-    }
-    function lsSet(key, value) {
-      try { localStorage.setItem(key, value); } catch (e) { }
-    }
-    function lsRemove(key) {
-      try { localStorage.removeItem(key); } catch (e) { }
-    }
-    function loadHistory() {
-      try {
-        const parsed = JSON.parse(lsGet("mantraHistory", "[]"));
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (e) { return []; }
-    }
-
-    function updateSyncStatus(state, message) {
-      const el = document.getElementById("sync-status");
-      if (!el) return;
-      el.className = "";
-      if (state) el.classList.add(state);
-      el.textContent = message || "";
-    }
-
-    function formatHyper(state) {
-      if (!state) return "";
-      const op = state.op, base = state.base, iter = state.iter;
-      if (op === 3) return base + " ^ " + iter;
-      return base + " " + "↑".repeat(op - 2) + " " + iter;
-    }
-
+    /* ============================================================
+       ARBITRARY PRECISION HELPERS
+       ============================================================ */
     function bigZero() { return { m: 0n, e: 0 }; }
     function bigNormalize(x) {
       let m = x.m, e = x.e;
@@ -314,7 +288,10 @@
       mantStr = mantStr.replace(/^0+/, "") || "0";
       return bigNormalize({ m: BigInt(mantStr) * sign, e: exp });
     }
-    function bigFromNumber(n) { return isFinite(n) ? bigFromString(String(n)) : null; }
+    function bigFromNumber(n) {
+      if (!isFinite(n)) return null;
+      return bigFromString(String(n));
+    }
     function toBig(x) {
       if (x === null || x === undefined) return bigZero();
       if (typeof x === "object" && typeof x.m === "bigint" && typeof x.e === "number") return x;
@@ -331,8 +308,14 @@
       if (a.m === 0n) return { m: b.m, e: b.e };
       if (b.m === 0n) return { m: a.m, e: a.e };
       const e = Math.min(a.e, b.e);
-      const am = a.m * (10n ** BigInt(a.e - e));
-      const bm = b.m * (10n ** BigInt(b.e - e));
+      const diffA = a.e - e;
+      const diffB = b.e - e;
+      // Safety: if exponent difference is enormous, smaller term is negligible
+      // Prevents BigInt blowup with googolplex-class exponents
+      if (diffA > 1000) return { m: b.m, e: b.e };
+      if (diffB > 1000) return { m: a.m, e: a.e };
+      const am = a.m * (10n ** BigInt(diffA));
+      const bm = b.m * (10n ** BigInt(diffB));
       return bigNormalize({ m: am + bm, e: e });
     }
     function bigIsZero(a) { return toBig(a).m === 0n; }
@@ -358,7 +341,12 @@
       const first = mantStr[0];
       const rest = mantStr.slice(1);
       const mantDisplay = rest ? first + "." + rest : first;
-      return (neg ? "-" : "") + mantDisplay + "e" + (sciExp >= 0 ? "+" : "") + sciExp;
+      // Handle googolplex-class exponents gracefully
+      if (sciExp < 1e6) {
+        return (neg ? "-" : "") + mantDisplay + "e" + (sciExp >= 0 ? "+" : "") + sciExp;
+      } else {
+        return (neg ? "-" : "") + mantDisplay + "×10^" + sciExp.toExponential();
+      }
     }
     function bigToStorage(a) {
       const s = bigToDisplay(a);
@@ -410,6 +398,63 @@
       return { sci: v, num: num, scientific: scientific };
     }
 
+    /* ============================================================
+       ITER HELPERS (for hyperops iter as Number or {m, e})
+       ============================================================ */
+    function iterAsSci(iter) {
+      if (iter === null || iter === undefined) return { m: 0n, e: 0 };
+      if (typeof iter === "object" && typeof iter.m === "bigint") return iter;
+      if (typeof iter === "number") return bigFromNumber(iter) || { m: 0n, e: 0 };
+      return bigFromString(String(iter)) || { m: 0n, e: 0 };
+    }
+    function iterDisplay(iter) {
+      if (typeof iter === "number") return String(iter);
+      return bigToDisplay(iter);
+    }
+    function iterAdd(iter, amountSci) {
+      const a = iterAsSci(iter);
+      const result = bigAdd(a, amountSci);
+      // Downgrade back to Number if safely small
+      if (typeof iter === "number" && result.e >= 0 && result.e < 15) {
+        const n = Number(result.m) * Math.pow(10, result.e);
+        if (Number.isSafeInteger(n) && Math.abs(n) < 1e15) return n;
+      }
+      return result;
+    }
+
+    function lsGet(key, fallback) {
+      try { const v = localStorage.getItem(key); return v === null ? fallback : v; }
+      catch (e) { return fallback; }
+    }
+    function lsSet(key, value) {
+      try { localStorage.setItem(key, value); } catch (e) { }
+    }
+    function lsRemove(key) {
+      try { localStorage.removeItem(key); } catch (e) { }
+    }
+    function loadHistory() {
+      try {
+        const parsed = JSON.parse(lsGet("mantraHistory", "[]"));
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) { return []; }
+    }
+
+    function updateSyncStatus(state, message) {
+      const el = document.getElementById("sync-status");
+      if (!el) return;
+      el.className = "";
+      if (state) el.classList.add(state);
+      el.textContent = message || "";
+    }
+
+    function formatHyper(state) {
+      if (!state) return "";
+      const op = state.op, base = state.base;
+      const iterStr = iterDisplay(state.iter);
+      if (op === 3) return base + " ^ " + iterStr;
+      return base + " " + "↑".repeat(op - 2) + " " + iterStr;
+    }
+
     function setMantra() {
       const inputEl = document.getElementById("mantraInput");
       const input = (inputEl && inputEl.value ? inputEl.value : "").trim();
@@ -433,7 +478,7 @@
         if (!hyperState || hyperState.base !== raw || hyperState.op !== op) {
           hyperState = { base: raw, op: op, iter: 1 };
         } else {
-          hyperState.iter++;
+          hyperState.iter = iterAdd(hyperState.iter, { m: 1n, e: 0 });
         }
         count = bigZero();
         updateDisplay();
@@ -535,7 +580,7 @@
       if (typeof stored === "string" && (stored.includes("↑") || stored.includes("^"))) {
         const parts = stored.split(" ");
         if (parts.length === 3) {
-          const base = parts[0], symbol = parts[1], iter = parseInt(parts[2]);
+          const base = parts[0], symbol = parts[1], iterRaw = parts[2];
           let op = 3;
           if (symbol === "^") op = 3;
           else if (symbol === "↑↑") op = 4;
@@ -545,6 +590,13 @@
           else if (symbol === "↑↑↑↑↑↑") op = 8;
           else if (symbol === "↑↑↑↑↑↑↑") op = 9;
           else if (symbol === "↑↑↑↑↑↑↑↑") op = 10;
+          // Iter may be a plain integer OR scientific notation
+          let iter;
+          if (/[eE]/.test(iterRaw)) {
+            iter = bigFromString(iterRaw) || 0;
+          } else {
+            iter = parseInt(iterRaw, 10) || 0;
+          }
           hyperState = { base: base, op: op, iter: iter };
           count = bigZero();
         } else { hyperState = null; count = bigZero(); }
@@ -613,10 +665,24 @@
       const saved = lsGet("operationValue", "1");
       document.getElementById("operationSelect").value = saved;
     }
+    function applyTurboSpeed(value) {
+      if (value === "googolplex") {
+        // Googolplex = 10^(10^100) = {m: 1n, e: 1e100}
+        turboBatchSci = { m: 1n, e: 1e100 };
+        turboBatch = 1e100; // Numeric fallback (googol) for places needing Number
+      } else {
+        turboBatch = Number(value) || 1000000000;
+        turboBatchSci = null;
+      }
+    }
     function loadSavedTurboSpeed() {
       const saved = lsGet("turboSpeedValue", "1000000000");
-      document.getElementById("turboSpeedSelect").value = saved;
-      turboBatch = parseInt(saved) || 1000000000;
+      const select = document.getElementById("turboSpeedSelect");
+      // Guard against stale value
+      const validOption = Array.from(select.options).some(o => o.value === saved);
+      const chosen = validOption ? saved : "1000000000";
+      select.value = chosen;
+      applyTurboSpeed(chosen);
     }
 
     document.getElementById("customNumberInput").addEventListener("input", function() {
@@ -636,7 +702,7 @@
       saveDataToCloud();
     });
     document.getElementById("turboSpeedSelect").addEventListener("change", function() {
-      turboBatch = parseInt(this.value) || 1000000000;
+      applyTurboSpeed(this.value);
       lsSet("turboSpeedValue", this.value);
     });
 
@@ -682,13 +748,7 @@
     }
 
     /* ============================================================
-       🚀 TURBO MODE — MAXIMUM SPEED (up to 1 Trillion per tick)
-       - Math loop uses setTimeout(fn, 0) → fires ~250-400/sec
-       - Batch size configurable: Normal → Fast → Extreme → Ludicrous
-                                 → Insane (1B) → Godmode (1T)
-       - Add mode: precomputed batch addend → one BigInt add per tick
-       - Multiply mode: capped internal exponent to stay storable
-       - Display loop runs separately at 60 fps via requestAnimationFrame
+       🚀 TURBO MODE — up to Googolplex per tick
        ============================================================ */
     function toggleTurbo() {
       turboEnabled = !turboEnabled;
@@ -724,13 +784,13 @@
         count = toBig(count);
 
         if (op === 2) {
-          // Multiply mode: cap internal exponent so numbers stay storable.
-          // 100 is plenty — 10^150 ^ 100 per tick = 10^(15000) growth per tick.
+          // Multiply mode: capped internal exponent (100× per tick)
           turboBatchMultiplier = bigPow(turboReps, 100);
           turboBatchAddend = null;
         } else {
-          // Add mode: precompute reps × batch ONCE. Each tick = one BigInt add.
-          turboBatchAddend = bigMul(turboReps, bigFromNumber(turboBatch));
+          // Add mode: precompute reps × batch once. Uses Sci for googolplex.
+          const batchSci = turboBatchSci || bigFromNumber(turboBatch) || { m: 1n, e: 9 };
+          turboBatchAddend = bigMul(turboReps, batchSci);
           turboBatchMultiplier = null;
         }
       }
@@ -742,7 +802,8 @@
       turboActive = true;
       turboFrames = 0;
       turboStartedAt = performance.now();
-      turboBatch = parseInt(document.getElementById("turboSpeedSelect").value) || 1000000000;
+      // Re-read the select (in case it changed)
+      applyTurboSpeed(document.getElementById("turboSpeedSelect").value);
       prepareTurbo();
       turboMathTick();
       turboDisplayLoop();
@@ -762,7 +823,9 @@
       if (currentMantra) {
         storeCount(currentMantra, count);
         if (hyperState) {
-          storeDailyCount(currentMantra, turboFrames * turboBatch);
+          // Cap daily increment to avoid astronomical daily counts
+          const dailyInc = Math.min(turboFrames * turboBatch, 1e15);
+          storeDailyCount(currentMantra, dailyInc);
         }
       }
       // Force immediate cloud save (bypasses debounce)
@@ -779,7 +842,9 @@
       if (!turboActive) return;
 
       if (turboHyper) {
-        hyperState.iter += turboBatch;
+        // Iter increment — supports Number AND {m, e}
+        const batchSci = turboBatchSci || bigFromNumber(turboBatch) || { m: 1n, e: 0 };
+        hyperState.iter = iterAdd(hyperState.iter, batchSci);
       } else if (turboMode === 2) {
         count = bigMul(count, turboBatchMultiplier);
       } else {
@@ -788,7 +853,6 @@
 
       turboFrames++;
 
-      // Auto-save to localStorage every ~1000 ticks (crash safety)
       if (turboFrames % 1000 === 0 && currentMantra) {
         storeCount(currentMantra, count);
       }
